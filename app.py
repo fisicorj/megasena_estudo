@@ -531,7 +531,6 @@ def icon_card(icon: str, title: str, value: str, sub: str = ""):
     )
 
 def style_top_table(df: pd.DataFrame):
-    # Com matplotlib instalado, o gradiente funciona
     styler = df.style.format({"n": lambda x: f"{int(x):02d}", "count": "{:.0f}", "pct": "{:.2f}%"})
     styler = styler.background_gradient(subset=["count"], cmap="Blues")
     styler = styler.background_gradient(subset=["pct"], cmap="Greens")
@@ -559,7 +558,9 @@ with st.sidebar:
         value=st.session_state["compact"],
         key="compact_toggle_sidebar",
     )
+    # sync
     st.session_state["compact"] = compact_toggle
+
     modo_didatico = st.toggle("Modo didático (avisos)", value=False)
 
     st.divider()
@@ -607,13 +608,17 @@ with st.sidebar:
 modo_compact = bool(st.session_state["compact"])
 inject_css(modo_compact)
 
+# ✅ FIX: exit compact must also reset the widget key, otherwise toggle stays True
+def exit_compact():
+    st.session_state["compact"] = False
+    st.session_state["compact_toggle_sidebar"] = False  # critical
+    st.rerun()
+
 # Escape button (visible even when sidebar is hidden)
 if modo_compact:
     cols = st.columns([2, 6, 2])
     with cols[0]:
-        if st.button("⬅️ Voltar do modo compact", use_container_width=True):
-            st.session_state["compact"] = False
-            st.rerun()
+        st.button("⬅️ Voltar do modo compact", use_container_width=True, on_click=exit_compact)
 
 # Header
 st.markdown("## 🎲 Mega-Sena — Gerador (cobertura + top score)")
@@ -874,7 +879,6 @@ with tab_report:
         use_container_width=True,
     )
 
-    # PDF
     pdf_bytes = build_report_pdf(result)
     st.download_button(
         "📄 Baixar relatório em PDF",
@@ -884,7 +888,7 @@ with tab_report:
         use_container_width=True,
     )
 
-    st.caption("Para imprimir: ative **Modo compact** na sidebar e use Ctrl+P no navegador.")
+    st.caption("Para imprimir: ative **Modo compact** e use Ctrl+P no navegador.")
     st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================
