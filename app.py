@@ -571,39 +571,48 @@ def build_canhoto_pdf_visual_only_picks(
         c.drawString(x, y, f"{idx:02d} • {label}")
 
     def draw_picks_balls(x0, y0, w, h, nums):
-        """
-        Desenha apenas as dezenas do jogo (6 bolinhas),
-        com estilo tipo "selecionadas".
-        """
-        nums = sorted([int(n) for n in nums])
+    """
+    Desenha apenas as dezenas do jogo (6 bolinhas) com tamanho controlado.
+    """
+    nums = sorted([int(n) for n in nums])
 
-        # círculo grande, espaçado
-        r = min(w / 12, h / 3)  # raio
-        gap = r * 0.9
+    # --- Tamanho controlado ---
+    # espaço horizontal por bolinha (6) + 5 gaps
+    # r escolhido para caber bem e não ficar gigante.
+    target_r = (w / (6 * 2 + 5 * 0.9)) / 2  # baseado no width e num gaps
+    r = max(5.0 * mm, min(target_r, 8.0 * mm))  # clamp: 5mm <= r <= 8mm
 
-        total_w = 6 * (2 * r) + 5 * gap
-        start_x = x0 + (w - total_w) / 2 + r
-        cy = y0 + h / 2
+    gap = r * 0.9
+    total_w = 6 * (2 * r) + 5 * gap
+    start_x = x0 + (w - total_w) / 2 + r
 
-        c.setFont("Helvetica-Bold", 16)
-        for i, n in enumerate(nums):
-            cx = start_x + i * (2 * r + gap)
+    # centraliza verticalmente
+    cy = y0 + h / 2
 
-            c.setFillColor(GREEN)
-            c.setStrokeColor(GREEN)
-            c.setLineWidth(1.2)
-            c.circle(cx, cy, r, stroke=1, fill=1)
+    # fonte proporcional ao raio (controlada)
+    font_size = max(12, min(18, int(r / mm * 2)))  # ~ 12..18
+    c.setFont("Helvetica-Bold", font_size)
 
-            c.setFillColor(WHITE)
-            c.drawCentredString(cx, cy - 5.5, f"{n:02d}")
+    for i, n in enumerate(nums):
+        cx = start_x + i * (2 * r + gap)
 
-        # linha “assinatura” no rodapé do bloco
-        c.setStrokeColor(colors.HexColor("#D1D9DD"))
-        c.setLineWidth(0.8)
-        c.line(x0, y0 + 6 * mm, x0 + w, y0 + 6 * mm)
-        c.setFillColor(colors.HexColor("#6B7A7E"))
-        c.setFont("Helvetica", 8)
-        c.drawString(x0, y0 + 2.5 * mm, "Conferido / Assinatura")
+        c.setFillColor(colors.HexColor("#0B8F3B"))
+        c.setStrokeColor(colors.HexColor("#0B8F3B"))
+        c.setLineWidth(1.1)
+        c.circle(cx, cy, r, stroke=1, fill=1)
+
+        c.setFillColor(colors.white)
+        # ajuste fino do baseline conforme o tamanho
+        c.drawCentredString(cx, cy - (font_size * 0.32), f"{n:02d}")
+
+    # linha “assinatura” no rodapé do bloco
+    c.setStrokeColor(colors.HexColor("#D1D9DD"))
+    c.setLineWidth(0.8)
+    c.line(x0, y0 + 6 * mm, x0 + w, y0 + 6 * mm)
+    c.setFillColor(colors.HexColor("#6B7A7E"))
+    c.setFont("Helvetica", 8)
+    c.drawString(x0, y0 + 2.5 * mm, "Conferido / Assinatura")
+
 
     def draw_block(y_bottom, kind, idx_global, nums, label):
         y_top = y_bottom + block_h
