@@ -50,6 +50,23 @@ def save_log(record: dict, path: str):
 def fmt_nums(nums):
     return " ".join(f"{int(n):02d}" for n in nums)
 
+def is_cloud() -> bool:
+    # heurística: ambiente gerenciado
+    return bool(os.getenv("STREAMLIT_CLOUD") or os.getenv("STREAMLIT_RUNTIME") or os.getenv("STREAMLIT_SERVER_HEADLESS"))
+
+def normalize_weights(wf, wr):
+    if abs((wf + wr) - 1.0) > 1e-9:
+        s = wf + wr
+        if s <= 0:
+            return 0.5, 0.5
+        wf = wf / s
+        wr = 1.0 - wf
+    return wf, wr
+
+def make_key(seed_run, excel_sha, params: dict):
+    base = json.dumps({"seed": seed_run, "sha": excel_sha, "params": params}, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(base).hexdigest()
+
 
 # =========================
 # LOAD
@@ -192,9 +209,7 @@ def generate_pool_with_progress(
 
     hard_limit = pool_size * 40
     tries = 0
-
-    # atualiza progress por tentativas (porque pool é filtrado por heurísticas)
-    step = max(1, hard_limit // 200)
+    step = max(1, hard_limit // 220)
 
     while len(pool) < pool_size and tries < hard_limit:
         tries += 1
@@ -316,7 +331,7 @@ def select_top_without_ruining(
 
 
 # =========================
-# METRICS
+# METRICS / SUMMARY
 # =========================
 def coverage_metrics(used_counts: Counter):
     if not used_counts:
@@ -328,39 +343,138 @@ def coverage_metrics(used_counts: Counter):
         "most_common": [{"n": int(n), "count": int(c)} for n, c in mc],
     }
 
+def build_exec_summary(result: dict) -> list[str]:
+    """Gera bulletpoints automáticos."""
+    params = result["params"]
+    m20 = result["coverage_metrics_20"]
+    mt = result["coverage_metrics_total"]
+
+    bullets = []
+    bullets.append(f"Execução em **{result['timestamp_sp']}** com seed **{result['seed']}** (reprodutível).")
+    bullets.append(f"Base: **{result['rows']}** sorteios válidos • Arquivo **{result['excel_name']}** (SHA256 `{result['excel_sha256'][:12]}…`).")
+    bullets.append(f"Pool válido: **{result['pool_len']:,}** jogos (tentativas: {result['pool_tries']:,}).")
+    bullets.append(
+        f"Cobertura: **{len(result['games_coverage'])}** jogos • **{m20['distinct']}** números distintos • pico (**peak**) = **{m20['peak']}**."
+    )
+    if params["n_top"] > 0:
+        bullets.append(f"TOP: **{len(result['games_top'])}** jogos adicionais (restrições: overlap ≤ {params['top_rules']['max_overlap']}, máx/num ≤ {params['top_rules']['max_count_total']}).")
+    else:
+        bullets.append("TOP: desativado (N_TOP = 0).")
+
+    bullets.append(
+        f"Config: pesos **freq={params['w_freq']:.2f}** / **recência={params['w_recency']:.2f}** (λ={params['recency_lambda']:.3f}) • β cobertura={params['cover_beta']:.2f}."
+    )
+
+    if mt["distinct"] != m20["distinct"]:
+        bullets.append(f"Após TOP: distintos = **{mt['distinct']}** • peak total = **{mt['peak']}**.")
+    else:
+        bullets.append(f"Após TOP: distintos mantidos = **{mt['distinct']}** • peak total = **{mt['peak']}**.")
+
+    # números mais frequentes na cobertura
+    if m20["most_common"]:
+        top_used = ", ".join([f"{x['n']:02d}×{x['count']}" for x in m20["most_common"][:5]])
+        bullets.append(f"Números mais usados (20 jogos): {top_used}.")
+
+    return bullets
+
+def build_report_text(result: dict) -> str:
+    """Relatório compacto para copiar/colar e imprimir."""
+    lines = []
+    lines.append("RELATÓRIO — GERAÇÃO DE JOGOS (MEGA-SENA)")
+    lines.append("=" * 48)
+    lines.append(f"Data/Hora (SP): {result['timestamp_sp']}")
+    lines.append(f"Seed: {result['seed']}")
+    lines.append(f"Arquivo: {result['excel_name']} | SHA256: {result['excel_sha256']}")
+    lines.append(f"Sorteios válidos: {result['rows']}")
+    lines.append("")
+    lines.append("Resumo executivo:")
+    for b in build_exec_summary(result):
+        lines.append(f"- {b}")
+    lines.append("")
+    lines.append("Jogos com cobertura:")
+    for i, g in enumerate(result["games_coverage"], 1):
+        lines.append(f"{i:02d}: {fmt_nums(g)}")
+    lines.append("")
+    lines.append("TOP (sem estragar cobertura):")
+    if result["games_top"]:
+        for i, t in enumerate(result["games_top"], 1):
+            lines.append(f"TOP {i}: {fmt_nums(t['nums'])} | score={t['score']:.4f} | overlap={t['overlap_with_20']}/6")
+    else:
+        lines.append("[Sem TOP adicional]")
+    lines.append("")
+    lines.append("Métricas (20 jogos):")
+    lines.append(json.dumps(result["coverage_metrics_20"], ensure_ascii=False, indent=2))
+    lines.append("")
+    lines.append("Métricas (total):")
+    lines.append(json.dumps(result["coverage_metrics_total"], ensure_ascii=False, indent=2))
+    lines.append("")
+    lines.append("Parâmetros:")
+    lines.append(json.dumps(result["params"], ensure_ascii=False, indent=2))
+    return "\n".join(lines)
+
 
 # =========================
-# UI helpers (visual)
+# UI (visual)
 # =========================
-def inject_css():
+def inject_css(compact: bool):
+    base = """
+    <style>
+      .block-container { padding-top: 1.1rem; padding-bottom: 2.5rem; }
+      .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+      .stTabs [data-baseweb="tab"] { padding: 10px 14px; border-radius: 12px; }
+      .muted { opacity: .75; }
+      .card {
+        border: 1px solid rgba(255,255,255,0.10);
+        background: rgba(255,255,255,0.03);
+        border-radius: 16px;
+        padding: 14px 16px;
+      }
+      .card-title { font-size: 0.9rem; opacity: .8; margin-bottom: 6px; }
+      .card-value { font-size: 1.35rem; font-weight: 700; line-height: 1.2; }
+      .card-sub { font-size: 0.85rem; opacity: .75; margin-top: 6px; }
+      .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+      @media (max-width: 1100px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+      @media (max-width: 600px) { .grid { grid-template-columns: repeat(1, 1fr); } }
+      code { border-radius: 8px; padding: 2px 6px; }
+      .pill {
+        display: inline-flex; gap: 6px; align-items: center;
+        padding: 6px 10px; border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.10);
+        background: rgba(255,255,255,0.03);
+        font-size: 0.85rem; opacity: .85;
+      }
+      .section { margin-top: 6px; }
+      .hr { height: 1px; background: rgba(255,255,255,0.08); margin: 12px 0; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    </style>
+    """
+    compact_css = """
+    <style>
+      .block-container { max-width: 980px; }
+      header, footer { visibility: hidden; height: 0; }
+      .stSidebar { display: none; }
+      .stTabs [data-baseweb="tab-list"] { display: none; }
+      .card { padding: 10px 12px; border-radius: 14px; }
+      .card-value { font-size: 1.15rem; }
+    </style>
+    """ if compact else ""
+
+    st.markdown(base + compact_css, unsafe_allow_html=True)
+
+def icon_card(icon: str, title: str, value: str, sub: str = ""):
     st.markdown(
-        """
-        <style>
-        .block-container { padding-top: 1.2rem; padding-bottom: 2.5rem; }
-        .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-        .stTabs [data-baseweb="tab"] { padding: 10px 14px; border-radius: 12px; }
-        .card {
-            border: 1px solid rgba(255,255,255,0.08);
-            background: rgba(255,255,255,0.02);
-            border-radius: 16px;
-            padding: 16px;
-        }
-        .muted { opacity: 0.75; }
-        code { border-radius: 8px; padding: 2px 6px; }
-        </style>
+        f"""
+        <div class="card">
+          <div class="card-title">{icon} {title}</div>
+          <div class="card-value">{value}</div>
+          {f'<div class="card-sub">{sub}</div>' if sub else ''}
+        </div>
         """,
         unsafe_allow_html=True,
     )
 
 def style_top_table(df):
-    # df com colunas: n, count, pct (pct já pode estar em float)
-    styler = df.style.format(
-        {
-            "n": lambda x: f"{int(x):02d}",
-            "count": "{:.0f}",
-            "pct": "{:.2f}%",
-        }
-    )
+    styler = df.style.format({"n": lambda x: f"{int(x):02d}", "count": "{:.0f}", "pct": "{:.2f}%"})
     styler = styler.background_gradient(subset=["count"], cmap="Blues")
     styler = styler.background_gradient(subset=["pct"], cmap="Greens")
     return styler
@@ -370,15 +484,16 @@ def style_top_table(df):
 # STREAMLIT APP
 # =========================
 st.set_page_config(page_title="Mega-Sena • Cobertura + Score", layout="wide")
-inject_css()
 
-st.markdown("## 🎲 Mega-Sena — Gerador de jogos (cobertura + top score)")
-st.markdown('<div class="muted">Carregue seu Excel, ajuste parâmetros e gere jogos com seed registrada (reprodutível).</div>', unsafe_allow_html=True)
-
-# Sidebar
+# Sidebar options
 with st.sidebar:
     st.header("📥 Entrada")
     up = st.file_uploader("Upload do Excel (.xlsx)", type=["xlsx"])
+
+    st.divider()
+    st.header("🧾 Exibição")
+    modo_compact = st.toggle("Modo compact (impressão/relatório)", value=False)
+    modo_didatico = st.toggle("Modo didático (avisos)", value=False)
 
     st.divider()
     st.header("⚙️ Execução")
@@ -390,14 +505,14 @@ with st.sidebar:
         seed_fixed = st.number_input("Seed fixa (uint64)", min_value=0, max_value=2**64 - 1, value=123, step=1)
 
     st.divider()
-    st.header("🧠 Parâmetros (principal)")
+    st.header("🧠 Parâmetros")
     pool_size = st.number_input("POOL_SIZE", min_value=10_000, max_value=2_000_000, value=200_000, step=10_000)
     scan_top = st.number_input("SCAN_TOP (cobertura)", min_value=5_000, max_value=300_000, value=50_000, step=5_000)
     n_cobertura = st.number_input("N_COBERTURA (jogos)", min_value=5, max_value=50, value=20, step=1)
     n_top = st.number_input("N_TOP (top jogos)", min_value=0, max_value=10, value=2, step=1)
 
     st.divider()
-    st.header("📌 Pesos (freq + recência)")
+    st.header("📌 Pesos")
     w_freq = st.slider("W_FREQ", 0.0, 1.0, 0.55, 0.01)
     w_recency = st.slider("W_RECENCY", 0.0, 1.0, 0.45, 0.01)
     recency_lambda = st.number_input("RECENCY_LAMBDA", min_value=0.0, max_value=0.05, value=0.004, step=0.001, format="%.3f")
@@ -410,25 +525,33 @@ with st.sidebar:
     max_por_dezena = st.number_input("MAX_POR_DEZENA", 1, 6, 3, 1)
 
     st.divider()
-    st.header("🛡️ Cobertura / TOP rules")
+    st.header("🛡️ Cobertura/TOP")
     cover_beta = st.slider("COVER_BETA", 0.0, 2.0, 0.45, 0.01)
     max_count_total = st.number_input("MAX_COUNT_PER_NUMBER_TOTAL", 1, 10, 3, 1)
     max_overlap = st.number_input("MAX_OVERLAP_WITH_COVERAGE", 0, 6, 4, 1)
     dont_increase_peak = st.toggle("DONT_INCREASE_PEAK", value=True)
 
     st.divider()
-    st.header("🧑‍🏫 Modo didático")
-    modo_didatico = st.toggle("Mostrar avisos e explicações", value=False)
-
-    st.divider()
     st.header("🧾 Log")
     enable_log = st.toggle("Salvar log JSONL", value=False)
     log_path = st.text_input("LOG_PATH", value=DEFAULT_LOG_PATH, disabled=not enable_log)
 
-# Load dataset
-excel_sha = None
-excel_name = None
 
+# Inject CSS now that we know compact mode
+inject_css(modo_compact)
+
+# Header
+st.markdown("## 🎲 Mega-Sena — Gerador (cobertura + top score)")
+st.markdown('<div class="muted">Gere combinações com seed registrada, cobertura de números e seleção por score.</div>', unsafe_allow_html=True)
+
+# Didactic note
+if modo_didatico:
+    st.info(
+        "📌 **Observação didática**: o algoritmo não prevê resultados. "
+        "Ele usa frequência/recência como ponderação para estudo estatístico e aplica heurísticas + cobertura."
+    )
+
+# Load dataset
 try:
     if up is not None:
         df, excel_sha, excel_name = load_megasena_from_upload(up)
@@ -445,39 +568,30 @@ if df is None:
     st.info("Envie um arquivo Excel (.xlsx) ou coloque `Mega-Sena.xlsx` na mesma pasta do app.")
     st.stop()
 
-# Didactic box
-if modo_didatico:
-    st.info(
-        "📌 **Observação didática**: frequência histórica e recência **não são previsão**. "
-        "O algoritmo é um estudo estatístico/heurístico para **gerar combinações** com critérios de cobertura, "
-        "mas sorteio é aleatório."
-    )
+# Precompute stats (quick)
+top_pos = top_by_position_with_pct(df, topk=10)
+top_all = top_overall(df, topk=15)
 
-# Tabs
-tab_stats, tab_run, tab_export, tab_debug = st.tabs(["📊 Estatísticas", "✅ Jogos", "⬇️ Exportar", "🧪 Debug"])
+# Init session cache
+if "runs" not in st.session_state:
+    st.session_state["runs"] = {}
+if "last_run_key" not in st.session_state:
+    st.session_state["last_run_key"] = None
 
-# Prévia
-with tab_debug:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.write(f"Arquivo: **{excel_name}**")
-    st.write(f"SHA256: `{excel_sha}`")
-    st.write(f"Linhas válidas: **{len(df)}**")
-    with st.expander("Prévia dos dados (15 primeiras linhas)", expanded=False):
-        st.dataframe(df.head(15), use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+# Tabs (in compact mode we can still show, but CSS hides the tab list)
+tab_stats, tab_run, tab_report, tab_export, tab_debug = st.tabs(
+    ["📊 Estatísticas", "✅ Jogos", "🧾 Relatório", "⬇️ Exportar", "🧪 Debug"]
+)
 
-# Estatísticas (sempre)
-topk_pos = 10
-topk_geral = 15
-top_pos = top_by_position_with_pct(df, topk=topk_pos)
-top_all = top_overall(df, topk=topk_geral)
-
+# =========================
+# Estatísticas
+# =========================
 with tab_stats:
     left, right = st.columns([1, 1], gap="large")
 
     with left:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Top por posição (contagem e %)")
+        st.markdown('<div class="card section">', unsafe_allow_html=True)
+        st.subheader("Top por posição")
         for col in BOLAS_COLS:
             tdf = pd.DataFrame(top_pos[col])
             st.markdown(f"**{col}**")
@@ -485,54 +599,29 @@ with tab_stats:
         st.markdown("</div>", unsafe_allow_html=True)
 
     with right:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("Top geral (contagem e %)")
+        st.markdown('<div class="card section">', unsafe_allow_html=True)
+        st.subheader("Top geral")
         tdf = pd.DataFrame(top_all)
         st.dataframe(style_top_table(tdf), use_container_width=True, hide_index=True)
 
-        # gráfico simples sem dependências extras
         chart_df = tdf.copy()
         chart_df["n"] = chart_df["n"].map(lambda x: f"{int(x):02d}")
         chart_df = chart_df.set_index("n")[["count"]]
-        st.caption("Gráfico (Top 15 por frequência):")
+        st.caption("Top 15 por frequência (barra):")
         st.bar_chart(chart_df)
 
         st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================
-# EXECUÇÃO: só roda ao clicar no botão
+# Execução
 # =========================
-def normalize_weights(wf, wr):
-    if abs((wf + wr) - 1.0) > 1e-9:
-        s = wf + wr
-        if s <= 0:
-            return 0.5, 0.5
-        wf = wf / s
-        wr = 1.0 - wf
-    return wf, wr
-
-def make_key(seed_run, excel_sha, params: dict):
-    # key estável p/ session cache
-    base = json.dumps({"seed": seed_run, "sha": excel_sha, "params": params}, sort_keys=True).encode("utf-8")
-    return hashlib.sha256(base).hexdigest()
-
-def log_allowed_on_public() -> bool:
-    # heurística: se estiver no streamlit cloud, desativa por padrão
-    # (você pode adaptar isso ao seu ambiente)
-    if os.getenv("STREAMLIT_CLOUD") or os.getenv("STREAMLIT_RUNTIME"):
-        return False
-    return True
-
 with tab_run:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="card section">', unsafe_allow_html=True)
     st.subheader("Geração de jogos")
-    st.caption("A geração (pool + seleção) só acontece quando você clica em **Gerar jogos** na sidebar.")
+    st.caption("A geração pesada só roda quando você clica em **Gerar jogos** na sidebar.")
 
     if run_btn:
-        # seed
         seed_run = int(seed_fixed) if seed_mode == "Fixar" else secrets.randbits(64)
-
-        # parâmetros normalizados
         w_freq_n, w_recency_n = normalize_weights(w_freq, w_recency)
 
         params = {
@@ -560,21 +649,16 @@ with tab_run:
         run_key = make_key(seed_run, excel_sha, params)
         st.session_state["last_run_key"] = run_key
 
-        # Se já existe em cache (session_state), reutiliza
-        if "runs" not in st.session_state:
-            st.session_state["runs"] = {}
-
+        # Cached?
         if run_key in st.session_state["runs"]:
-            st.success(f"✅ Resultado reutilizado do cache (sessão). seed={seed_run}")
             result = st.session_state["runs"][run_key]
+            st.success(f"✅ Reutilizado do cache da sessão • seed={seed_run}")
         else:
-            st.success(f"Execução iniciada: {now_sp()} | seed={seed_run}")
+            st.success(f"Iniciando: {now_sp()} • seed={seed_run}")
 
-            # pesos
-            with st.spinner("Calculando pesos (freq + recência)..."):
+            with st.spinner("Calculando pesos..."):
                 p = build_weights(df, w_freq=w_freq_n, w_recency=w_recency_n, recency_lambda=float(recency_lambda))
 
-            # pool com progresso real
             prog = st.progress(0.0)
             status = st.empty()
 
@@ -583,7 +667,7 @@ with tab_run:
                 prog.progress(frac)
                 status.write(f"Tentativas: **{tries:,}** / {hard_limit:,} • Pool válido: **{pool_len:,}**")
 
-            with st.spinner(f"Gerando pool (até {int(pool_size):,}) com heurísticas..."):
+            with st.spinner("Gerando pool com heurísticas..."):
                 pool, tries = generate_pool_with_progress(
                     p=p,
                     pool_size=int(pool_size),
@@ -598,7 +682,6 @@ with tab_run:
             prog.progress(1.0)
             status.write(f"Pool final: **{len(pool):,}** (tentativas: {tries:,})")
 
-            # seleção
             with st.spinner("Selecionando jogos com cobertura + TOPs..."):
                 jogos_20, used_20, scored, chosen_set = select_coverage_games(
                     pool, p, n_games=int(n_cobertura), beta=float(cover_beta), scan_top=int(scan_top)
@@ -633,39 +716,37 @@ with tab_run:
                 "coverage_metrics_total": mt,
             }
 
-            # guarda cache em sessão
             st.session_state["runs"][run_key] = result
 
-            # log (controlado)
             if enable_log:
-                if log_allowed_on_public():
+                if is_cloud():
+                    st.warning("Log desativado automaticamente em ambiente cloud/público.")
+                else:
                     try:
                         save_log(result, log_path)
                         st.info(f"Log salvo em: `{log_path}`")
                     except Exception as e:
-                        st.warning(f"Não consegui salvar log em `{log_path}`: {e}")
-                else:
-                    st.warning("Log desativado automaticamente em ambiente público/cloud (segurança).")
+                        st.warning(f"Falha ao salvar log: {e}")
 
-        # Exibir resultado
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Seed", str(result["seed"]))
-        c2.metric("Pool válido", f"{result['pool_len']:,}")
-        c3.metric("Distintos (20)", result["coverage_metrics_20"]["distinct"])
-        c4.metric("Peak (20)", result["coverage_metrics_20"]["peak"])
+        # Cards com ícones (métricas)
+        st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="grid">', unsafe_allow_html=True)
+        icon_card("🧬", "Seed", str(result["seed"]), "Reproduzível")
+        icon_card("🧺", "Pool válido", f"{result['pool_len']:,}", f"Tentativas: {result['pool_tries']:,}")
+        icon_card("🧩", "Distintos (20)", str(result["coverage_metrics_20"]["distinct"]), f"Peak: {result['coverage_metrics_20']['peak']}")
+        icon_card("🏆", "TOP adicionados", str(len(result["games_top"])), f"Total distinct: {result['coverage_metrics_total']['distinct']}")
+        st.markdown('</div>', unsafe_allow_html=True)
 
-        st.divider()
+        st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
         # 20 jogos
         st.markdown("### ✅ Jogos com cobertura")
-        jogos_20 = result["games_coverage"]
-        jogos_df = pd.DataFrame(jogos_20, columns=[f"N{i}" for i in range(1, 7)])
+        jogos_df = pd.DataFrame(result["games_coverage"], columns=[f"N{i}" for i in range(1, 7)])
         st.dataframe(jogos_df, use_container_width=True, hide_index=True)
 
-        # Top
+        # TOP
         st.markdown("### 🏆 TOP (sem estragar a cobertura)")
-        top_games = result["games_top"]
-        if len(top_games) == 0 and result["params"]["n_top"] > 0:
+        if len(result["games_top"]) == 0 and result["params"]["n_top"] > 0:
             st.warning("Não encontrei TOPs que respeitem as restrições. Afrouxe os limites.")
         else:
             top_df = pd.DataFrame(
@@ -675,33 +756,67 @@ with tab_run:
                         "Score": round(float(t["score"]), 4),
                         "Overlap com 20": f"{int(t['overlap_with_20'])}/6",
                     }
-                    for t in top_games
+                    for t in result["games_top"]
                 ]
             )
             st.dataframe(top_df, use_container_width=True, hide_index=True)
 
-        st.divider()
-
-        # Métricas
-        st.markdown("### 📊 Métricas")
-        mc1, mc2 = st.columns(2)
-        with mc1:
-            st.markdown("**20 jogos**")
-            st.json(result["coverage_metrics_20"])
-        with mc2:
-            st.markdown("**Total (20 + TOP)**")
-            st.json(result["coverage_metrics_total"])
-
     else:
-        st.info("Clique em **Gerar jogos** na sidebar para rodar. Os resultados ficam salvos no cache da sessão.")
+        st.info("Clique em **Gerar jogos** para rodar. Resultados ficam em cache na sessão.")
     st.markdown("</div>", unsafe_allow_html=True)
 
+# =========================
+# Relatório / Resumo executivo / Compact
+# =========================
+with tab_report:
+    st.markdown('<div class="card section">', unsafe_allow_html=True)
+    st.subheader("Resumo executivo + Relatório")
+
+    last_key = st.session_state.get("last_run_key")
+    runs = st.session_state.get("runs", {})
+    if not last_key or last_key not in runs:
+        st.info("Rode uma geração na aba **Jogos** para criar o relatório.")
+        st.markdown("</div>", unsafe_allow_html=True)
+        st.stop()
+
+    result = runs[last_key]
+    bullets = build_exec_summary(result)
+
+    st.markdown("### 🧾 Resumo executivo (automático)")
+    for b in bullets:
+        st.markdown(f"- {b}")
+
+    st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
+
+    st.markdown("### 🧾 Relatório (copiar/colar)")
+    report_text = build_report_text(result)
+    st.text_area("Relatório pronto", report_text, height=420)
+
+    # downloads do relatório
+    st.download_button(
+        "Baixar relatório (TXT)",
+        data=report_text.encode("utf-8"),
+        file_name=f"relatorio_megasena_{result['seed']}.txt",
+        mime="text/plain",
+        use_container_width=True,
+    )
+
+    st.download_button(
+        "Baixar resumo (MD)",
+        data=("\n".join([f"- {b}" for b in bullets])).encode("utf-8"),
+        file_name=f"resumo_megasena_{result['seed']}.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+
+    st.caption("Para imprimir: ative **Modo compact** na sidebar e use Ctrl+P no navegador.")
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================
-# EXPORT
+# Export (JSON/CSV/Excel)
 # =========================
 with tab_export:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
+    st.markdown('<div class="card section">', unsafe_allow_html=True)
     st.subheader("⬇️ Exportar resultados")
 
     last_key = st.session_state.get("last_run_key")
@@ -712,10 +827,8 @@ with tab_export:
         st.stop()
 
     result = runs[last_key]
-
     jogos_df = pd.DataFrame(result["games_coverage"], columns=[f"N{i}" for i in range(1, 7)])
 
-    top_games = result["games_top"]
     top_df = pd.DataFrame(
         [
             {
@@ -723,9 +836,9 @@ with tab_export:
                 "Score": round(float(t["score"]), 4),
                 "Overlap com 20": f"{int(t['overlap_with_20'])}/6",
             }
-            for t in top_games
+            for t in result["games_top"]
         ]
-    ) if len(top_games) else pd.DataFrame(columns=["Jogo", "Score", "Overlap com 20"])
+    ) if len(result["games_top"]) else pd.DataFrame(columns=["Jogo", "Score", "Overlap com 20"])
 
     # JSON
     st.download_button(
@@ -736,7 +849,7 @@ with tab_export:
         use_container_width=True,
     )
 
-    # CSV (20 jogos)
+    # CSV
     st.download_button(
         "Baixar CSV (20 jogos)",
         data=jogos_df.to_csv(index=False).encode("utf-8"),
@@ -748,26 +861,23 @@ with tab_export:
     # Excel com abas
     out = BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        # abas de jogos
         jogos_df.to_excel(writer, sheet_name="20_Jogos", index=False)
         top_df.to_excel(writer, sheet_name="Top", index=False)
-
-        # estatísticas
         pd.DataFrame(result["top_overall"]).to_excel(writer, sheet_name="Top_Geral", index=False)
 
-        # Top por posição (uma aba por posição fica chato; então concat em uma só)
         rows = []
         for col in BOLAS_COLS:
             for item in result["top_position"][col]:
                 rows.append({"posicao": col, **item})
         pd.DataFrame(rows).to_excel(writer, sheet_name="Top_Posicao", index=False)
 
-        # métricas
         pd.DataFrame([result["coverage_metrics_20"]]).to_excel(writer, sheet_name="Metricas_20", index=False)
         pd.DataFrame([result["coverage_metrics_total"]]).to_excel(writer, sheet_name="Metricas_Total", index=False)
-
-        # params
         pd.json_normalize(result["params"]).to_excel(writer, sheet_name="Params", index=False)
+
+        # relatório também no excel
+        report_text = build_report_text(result)
+        pd.DataFrame({"Relatorio": report_text.splitlines()}).to_excel(writer, sheet_name="Relatorio", index=False)
 
     st.download_button(
         "Baixar Excel completo (abas)",
@@ -777,5 +887,24 @@ with tab_export:
         use_container_width=True,
     )
 
-    st.caption("Dica: o Excel exportado já vem com abas de jogos, TOP, estatísticas e parâmetros.")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# =========================
+# Debug
+# =========================
+with tab_debug:
+    st.markdown('<div class="card section">', unsafe_allow_html=True)
+    st.subheader("Debug / Diagnóstico")
+
+    st.markdown(f"- Arquivo: **{excel_name}**")
+    st.markdown(f"- SHA256: `{excel_sha}`")
+    st.markdown(f"- Linhas válidas: **{len(df)}**")
+
+    with st.expander("Prévia (15 linhas)", expanded=False):
+        st.dataframe(df.head(15), use_container_width=True)
+
+    st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
+    st.markdown("**Cache da sessão**")
+    st.write(f"Runs armazenados: {len(st.session_state.get('runs', {}))}")
+
     st.markdown("</div>", unsafe_allow_html=True)
