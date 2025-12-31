@@ -72,6 +72,31 @@ def make_key(seed_run, excel_sha, params: dict):
     base = json.dumps({"seed": seed_run, "sha": excel_sha, "params": params}, sort_keys=True).encode("utf-8")
     return hashlib.sha256(base).hexdigest()
 
+def parse_seed_text(seed_text: str) -> int:
+    """
+    Aceita:
+      - decimal: "12345"
+      - hex: "0xDEADBEEF"
+    Retorna uint64 (0..2^64-1), ou levanta ValueError.
+    """
+    s = (seed_text or "").strip().lower()
+    if not s:
+        raise ValueError("Seed vazia.")
+
+    base = 10
+    if s.startswith("0x"):
+        base = 16
+
+    try:
+        val = int(s, base=base)
+    except Exception:
+        raise ValueError("Seed inválida. Use decimal (ex: 123) ou hex (ex: 0xDEADBEEF).")
+
+    if val < 0 or val > (2**64 - 1):
+        raise ValueError("Seed fora do intervalo uint64 (0..2^64-1).")
+
+    return val
+
 
 # =========================
 # LOAD
@@ -215,7 +240,6 @@ def generate_pool_with_progress(
 
     while len(pool) < pool_size and tries < hard_limit:
         tries += 1
-
         nums = tuple(sorted(map(int, rng.choice(np.arange(1, 61), size=6, replace=False, p=p[1:]))))
         if nums in seen:
             if progress_cb and tries % step == 0:
@@ -362,11 +386,7 @@ def build_exec_summary(result: dict) -> list[str]:
         bullets.append("TOP: desativado (N_TOP = 0).")
 
     bullets.append(f"Config: pesos freq={params['w_freq']:.2f} / recência={params['w_recency']:.2f} (λ={params['recency_lambda']:.3f}) • β={params['cover_beta']:.2f}.")
-
-    if mt["distinct"] != m20["distinct"]:
-        bullets.append(f"Após TOP: distintos = **{mt['distinct']}** • peak total = **{mt['peak']}**.")
-    else:
-        bullets.append(f"Após TOP: distintos mantidos = **{mt['distinct']}** • peak total = **{mt['peak']}**.")
+    bullets.append(f"Após TOP: distintos = **{mt['distinct']}** • peak total = **{mt['peak']}**.")
 
     if m20["most_common"]:
         top_used = ", ".join([f"{x['n']:02d}×{x['count']}" for x in m20["most_common"][:5]])
@@ -542,7 +562,6 @@ def style_top_table(df: pd.DataFrame):
 # =========================
 st.set_page_config(page_title="Mega-Sena • Cobertura + Score", layout="wide")
 
-# Session state for compact mode (prevents getting stuck)
 if "compact" not in st.session_state:
     st.session_state["compact"] = False
 
@@ -558,7 +577,6 @@ with st.sidebar:
         value=st.session_state["compact"],
         key="compact_toggle_sidebar",
     )
-    # sync
     st.session_state["compact"] = compact_toggle
 
     modo_didatico = st.toggle("Modo didático (avisos)", value=False)
@@ -568,9 +586,22 @@ with st.sidebar:
     run_btn = st.button("🚀 Gerar jogos", type="primary", use_container_width=True)
 
     seed_mode = st.radio("Seed", ["Aleatória", "Fixar"], horizontal=True)
-    seed_fixed = None
+
+    # ✅ FIX: seed fixa NÃO pode ser number_input (JS limita 2^53-1).
+    seed_text = None
+    seed_error = None
     if seed_mode == "Fixar":
-        seed_fixed = st.number_input("Seed fixa (uint64)", min_value=0, max_value=2**64 - 1, value=123, step=1)
+        seed_text = st.text_input(
+            "Seed fixa (uint64)",
+            value=st.session_state.get("seed_text", "123"),
+            help="Use decimal (ex: 123) ou hex (ex: 0xDEADBEEF). Intervalo: 0..2^64-1.",
+        )
+        st.session_state["seed_text"] = seed_text
+        try:
+            _ = parse_seed_text(seed_text)
+        except Exception as e:
+            seed_error = str(e)
+            st.error(seed_error)
 
     st.divider()
     st.header("🧠 Parâmetros")
@@ -608,19 +639,17 @@ with st.sidebar:
 modo_compact = bool(st.session_state["compact"])
 inject_css(modo_compact)
 
-# ✅ FIX: exit compact must also reset the widget key, otherwise toggle stays True
+# Exit compact (also resets widget key)
 def exit_compact():
     st.session_state["compact"] = False
-    st.session_state["compact_toggle_sidebar"] = False  # critical
+    st.session_state["compact_toggle_sidebar"] = False
     st.rerun()
 
-# Escape button (visible even when sidebar is hidden)
 if modo_compact:
     cols = st.columns([2, 6, 2])
     with cols[0]:
         st.button("⬅️ Voltar do modo compact", use_container_width=True, on_click=exit_compact)
 
-# Header
 st.markdown("## 🎲 Mega-Sena — Gerador (cobertura + top score)")
 st.markdown('<div class="muted">Gere combinações com seed registrada, cobertura de números e seleção por score.</div>', unsafe_allow_html=True)
 
@@ -647,27 +676,20 @@ if df is None:
     st.info("Envie um arquivo Excel (.xlsx) ou coloque `Mega-Sena.xlsx` na mesma pasta do app.")
     st.stop()
 
-# Precompute stats
 top_pos = top_by_position_with_pct(df, topk=10)
 top_all = top_overall(df, topk=15)
 
-# Session caches
 if "runs" not in st.session_state:
     st.session_state["runs"] = {}
 if "last_run_key" not in st.session_state:
     st.session_state["last_run_key"] = None
 
-# Tabs
 tab_stats, tab_run, tab_report, tab_export, tab_debug = st.tabs(
     ["📊 Estatísticas", "✅ Jogos", "🧾 Relatório", "⬇️ Exportar", "🧪 Debug"]
 )
 
-# =========================
-# Estatísticas
-# =========================
 with tab_stats:
     left, right = st.columns([1, 1], gap="large")
-
     with left:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.subheader("Top por posição")
@@ -688,19 +710,24 @@ with tab_stats:
         chart_df = chart_df.set_index("n")[["count"]]
         st.caption("Top 15 por frequência (barra):")
         st.bar_chart(chart_df)
-
         st.markdown("</div>", unsafe_allow_html=True)
 
-# =========================
-# Execução
-# =========================
 with tab_run:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("Geração de jogos")
     st.caption("A geração pesada só roda quando você clica em **Gerar jogos** na sidebar.")
 
     if run_btn:
-        seed_run = int(seed_fixed) if seed_mode == "Fixar" else secrets.randbits(64)
+        # block run if seed invalid
+        if seed_mode == "Fixar" and seed_error:
+            st.error("Corrija a seed fixa antes de gerar.")
+            st.stop()
+
+        if seed_mode == "Fixar":
+            seed_run = parse_seed_text(seed_text)
+        else:
+            seed_run = secrets.randbits(64)
+
         w_freq_n, w_recency_n = normalize_weights(w_freq, w_recency)
 
         params = {
@@ -779,7 +806,7 @@ with tab_run:
 
             result = {
                 "timestamp_sp": now_sp(),
-                "seed": seed_run,
+                "seed": int(seed_run),
                 "excel_name": excel_name,
                 "excel_sha256": excel_sha,
                 "rows": int(len(df)),
@@ -836,9 +863,6 @@ with tab_run:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-# =========================
-# Relatório
-# =========================
 with tab_report:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("Resumo executivo + Relatório + PDF")
@@ -858,7 +882,6 @@ with tab_report:
         st.markdown(f"- {b}")
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
-
     st.markdown("### 🧾 Relatório (copiar/colar)")
     report_text = build_report_text(result)
     st.text_area("Relatório pronto", report_text, height=420)
@@ -891,9 +914,6 @@ with tab_report:
     st.caption("Para imprimir: ative **Modo compact** e use Ctrl+P no navegador.")
     st.markdown("</div>", unsafe_allow_html=True)
 
-# =========================
-# Export
-# =========================
 with tab_export:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("⬇️ Exportar resultados")
@@ -960,9 +980,6 @@ with tab_export:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-# =========================
-# Debug
-# =========================
 with tab_debug:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("Debug / Diagnóstico")
