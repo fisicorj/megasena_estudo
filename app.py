@@ -503,109 +503,170 @@ def build_report_pdf(result: dict) -> bytes:
 
 
 # =========================
-# PDF CANHOTO (volante-like, NÃO OFICIAL)
+# PDF CANHOTO - VISUAL "APP" (somente números do jogo)
+# 2 jogos por página
+# TOP 2 separado em nova página (2 jogos por página)
 # =========================
-def build_canhoto_pdf(result: dict) -> bytes:
+def build_canhoto_pdf_visual_only_picks(
+    result: dict,
+    concurso: str = "",
+    sorteio: str = "",
+    titulo: str = "mega-sena",
+) -> bytes:
     """
-    PDF estilo "canhoto/volante" (não oficial):
-      - 20 jogos de cobertura
-      - + TOPs
-    Grade 2x6 => 12 por página.
+    PDF estilo 'volante/app' (não oficial), inspirado no visual:
+      - Barra superior verde
+      - Em vez de 01..60, mostra SOMENTE as dezenas sugeridas em "bolinhas"
+      - 2 jogos por página
+      - TOP 2 separado em nova página
     """
+
+    # Cores aproximadas
+    GREEN = colors.HexColor("#0B8F3B")
+    GREEN_DARK = colors.HexColor("#087233")
+    GREY_STROKE = colors.HexColor("#C8CDD0")
+    WHITE = colors.white
+    BG = colors.HexColor("#F7FAF8")
+
     buf = BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     W, H = A4
 
     margin = 12 * mm
-    header_h = 22 * mm
+    gap_block = 10 * mm
 
-    cols = 2
-    rows = 6
-    block_w = (W - 2 * margin - (cols - 1) * 6 * mm) / cols
-    block_h = (H - 2 * margin - header_h - (rows - 1) * 6 * mm) / rows
+    # 2 blocos por página (um em cima, um embaixo)
+    block_h = (H - 2 * margin - gap_block) / 2
+    block_w = W - 2 * margin
 
-    r = 4.3 * mm
-    gap = 3.0 * mm
-    ball_fill = colors.whitesmoke
-    ball_stroke = colors.black
-    text_color = colors.black
+    header_h = 16 * mm
+    inner_pad = 10 * mm
 
-    jogos = []
-    for g in result.get("games_coverage", []):
-        jogos.append(("COB", g))
-    for t in result.get("games_top", []):
-        jogos.append(("TOP", t["nums"]))
+    def draw_top_bar(y_top, concurso_txt, sorteio_txt):
+        """Barra verde no topo do bloco."""
+        c.setFillColor(GREEN)
+        c.setStrokeColor(GREEN)
+        c.rect(margin, y_top - header_h, block_w, header_h, stroke=0, fill=1)
 
-    def draw_header(page_no: int):
-        c.setFillColor(colors.black)
-        c.setFont("Helvetica-Bold", 14)
-        c.drawString(margin, H - margin - 8 * mm, "MEGA-SENA — CANHOTO (NÃO OFICIAL)")
+        c.setFillColor(WHITE)
+        c.setFont("Helvetica-Bold", 15)
+        c.drawString(margin + inner_pad, y_top - header_h + 5.2 * mm, titulo)
 
-        c.setFont("Helvetica", 9)
-        seed = result.get("seed", "-")
-        dt = result.get("timestamp_sp", "-")
-        excel = result.get("excel_name", "arquivo.xlsx")
-        sha12 = (result.get("excel_sha256", "")[:12] + "…") if result.get("excel_sha256") else ""
-        c.drawString(margin, H - margin - 14 * mm, f"Data/Hora: {dt}   |   Seed: {seed}")
-        c.drawString(margin, H - margin - 18 * mm, f"Base: {excel} ({sha12})   |   Página: {page_no}")
+        c.setFont("Helvetica", 10)
+        conc = concurso_txt.strip() or "Concurso ____"
+        sort = sorteio_txt.strip() or "Sorteio __/__/__"
+        right_text = f"{conc}   •   {sort}"
+        tw = c.stringWidth(right_text, "Helvetica", 10)
+        c.drawString(margin + block_w - inner_pad - tw, y_top - header_h + 5.8 * mm, right_text)
 
-        c.setStrokeColor(colors.black)
-        c.setLineWidth(0.7)
-        c.line(margin, H - margin - header_h, W - margin, H - margin - header_h)
+    def draw_block_frame(y_bottom):
+        c.setFillColor(BG)
+        c.setStrokeColor(colors.HexColor("#E7ECEE"))
+        c.setLineWidth(1)
+        c.roundRect(margin, y_bottom, block_w, block_h, 10, stroke=1, fill=1)
 
-    def draw_block(x, y, label, nums, idx):
-        c.setStrokeColor(colors.black)
-        c.setLineWidth(0.6)
-        c.roundRect(x, y, block_w, block_h, 6, stroke=1, fill=0)
+    def draw_game_label(x, y, label, idx, kind):
+        c.setFillColor(GREEN_DARK if kind == "TOP" else GREEN)
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(x, y, f"{idx:02d} • {label}")
 
-        c.setFont("Helvetica-Bold", 10)
-        c.setFillColor(colors.black)
-        c.drawString(x + 6 * mm, y + block_h - 7 * mm, f"{idx:02d} • {label}")
-
+    def draw_picks_balls(x0, y0, w, h, nums):
+        """
+        Desenha apenas as dezenas do jogo (6 bolinhas),
+        com estilo tipo "selecionadas".
+        """
         nums = sorted([int(n) for n in nums])
-        total_w = 6 * (2 * r) + 5 * gap
-        start_x = x + (block_w - total_w) / 2 + r
-        cy = y + block_h / 2 - 2 * mm
 
-        c.setFont("Helvetica-Bold", 10)
+        # círculo grande, espaçado
+        r = min(w / 12, h / 3)  # raio
+        gap = r * 0.9
+
+        total_w = 6 * (2 * r) + 5 * gap
+        start_x = x0 + (w - total_w) / 2 + r
+        cy = y0 + h / 2
+
+        c.setFont("Helvetica-Bold", 16)
         for i, n in enumerate(nums):
             cx = start_x + i * (2 * r + gap)
-            c.setFillColor(ball_fill)
-            c.setStrokeColor(ball_stroke)
+
+            c.setFillColor(GREEN)
+            c.setStrokeColor(GREEN)
+            c.setLineWidth(1.2)
             c.circle(cx, cy, r, stroke=1, fill=1)
 
-            c.setFillColor(text_color)
-            c.drawCentredString(cx, cy - 3.2, f"{n:02d}")
+            c.setFillColor(WHITE)
+            c.drawCentredString(cx, cy - 5.5, f"{n:02d}")
 
-        c.setStrokeColor(colors.black)
-        c.setLineWidth(0.4)
-        c.line(x + 6 * mm, y + 6 * mm, x + block_w - 6 * mm, y + 6 * mm)
-        c.setFont("Helvetica", 7)
-        c.drawString(x + 6 * mm, y + 2.5 * mm, "Conferido / Assinatura")
+        # linha “assinatura” no rodapé do bloco
+        c.setStrokeColor(colors.HexColor("#D1D9DD"))
+        c.setLineWidth(0.8)
+        c.line(x0, y0 + 6 * mm, x0 + w, y0 + 6 * mm)
+        c.setFillColor(colors.HexColor("#6B7A7E"))
+        c.setFont("Helvetica", 8)
+        c.drawString(x0, y0 + 2.5 * mm, "Conferido / Assinatura")
 
-    page_no = 1
-    draw_header(page_no)
+    def draw_block(y_bottom, kind, idx_global, nums, label):
+        y_top = y_bottom + block_h
+        draw_block_frame(y_bottom)
+        draw_top_bar(y_top, concurso, sorteio)
 
-    per_page = cols * rows
-    for i, (label, nums) in enumerate(jogos, start=1):
-        pos = (i - 1) % per_page
-        if pos == 0 and i != 1:
-            c.showPage()
-            page_no += 1
-            draw_header(page_no)
+        label_y = y_top - header_h - 7 * mm
+        draw_game_label(margin + inner_pad, label_y, label, idx_global, kind)
 
-        r_i = pos // cols
-        c_i = pos % cols
+        # área das bolinhas
+        balls_top = label_y - 10 * mm
+        balls_bottom = y_bottom + 12 * mm
+        balls_h = max(10 * mm, balls_top - balls_bottom)
+        balls_w = block_w - 2 * inner_pad
 
-        x = margin + c_i * (block_w + 6 * mm)
-        y_top = H - margin - header_h
-        y = y_top - (r_i + 1) * block_h - r_i * 6 * mm
+        draw_picks_balls(margin + inner_pad, balls_bottom, balls_w, balls_h, nums)
 
-        draw_block(x, y, label, nums, i)
+    # ---------- Listas ----------
+    cobertura = [(i + 1, "COBERTURA", g) for i, g in enumerate(result.get("games_coverage", []))]
+    top2 = []
+    if result.get("games_top"):
+        for i, t in enumerate(result["games_top"], 1):
+            top2.append((i, f"TOP {i}", t["nums"]))
 
-    c.showPage()
+    def render_list(items, kind, page_title=None):
+        per_page = 2
+        for i, (idx_local, label, nums) in enumerate(items, start=1):
+            pos = (i - 1) % per_page
+            if pos == 0:
+                if i != 1:
+                    c.showPage()
+
+                if page_title:
+                    c.setFillColor(GREEN_DARK if kind == "TOP" else GREEN)
+                    c.setFont("Helvetica-Bold", 16)
+                    c.drawString(margin, H - margin + 2 * mm, page_title)
+                    c.setStrokeColor(colors.HexColor("#D8DEE2"))
+                    c.setLineWidth(1)
+                    c.line(margin, H - margin, W - margin, H - margin)
+
+            # bloco de cima ou baixo
+            y_bottom = margin + block_h + gap_block if pos == 0 else margin
+
+            # índice global: cobertura usa sequência 01..N; top usa 01..2
+            idx_global = i if kind != "TOP" else idx_local
+
+            draw_block(
+                y_bottom=y_bottom,
+                kind=kind,
+                idx_global=idx_global,
+                nums=nums,
+                label=label,
+            )
+
+    # Cobertura
+    render_list(cobertura, kind="COB", page_title=None)
+
+    # TOP separado em nova página
+    if top2:
+        c.showPage()
+        render_list(top2, kind="TOP", page_title="TOP 2 (separado)")
+
     c.save()
-
     pdf = buf.getvalue()
     buf.close()
     return pdf
@@ -662,8 +723,6 @@ def icon_card(icon: str, title: str, value: str, sub: str = ""):
     )
 
 def style_top_table(df: pd.DataFrame):
-    # NÃO usa background_gradient (evita exigir matplotlib no runtime).
-    # Você pode reativar gradiente depois que garantir matplotlib no requirements.
     return df
 
 
@@ -973,6 +1032,18 @@ with tab_run:
             )
             st.dataframe(top_df, use_container_width=True, hide_index=True)
 
+        # ✅ Canhoto também aqui (aparece sempre após gerar)
+        st.markdown("### 🎟️ Canhoto (visual mega-sena — apenas dezenas sugeridas)")
+        canhoto_pdf = build_canhoto_pdf_visual_only_picks(result)
+        st.download_button(
+            "🎟️ Baixar canhoto (PDF)",
+            data=canhoto_pdf,
+            file_name=f"canhoto_visual_megasena_{result['seed']}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            key=f"dl_canhoto_run_{result['seed']}",
+        )
+
     else:
         st.info("Clique em **Gerar jogos** para rodar. Resultados ficam em cache na sessão.")
 
@@ -1001,14 +1072,15 @@ with tab_report:
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
-    st.markdown("### 🎟️ Canhoto (estilo volante) — PDF")
-    canhoto_pdf = build_canhoto_pdf(result)
+    st.markdown("### 🎟️ Canhoto (estilo app) — PDF")
+    canhoto_pdf = build_canhoto_pdf_visual_only_picks(result)
     st.download_button(
-        "🎟️ Baixar canhoto (PDF estilo volante)",
+        "🎟️ Baixar canhoto (PDF estilo app)",
         data=canhoto_pdf,
-        file_name=f"canhoto_megasena_{result['seed']}.pdf",
+        file_name=f"canhoto_visual_megasena_{result['seed']}.pdf",
         mime="application/pdf",
         use_container_width=True,
+        key=f"dl_canhoto_report_{result['seed']}",
     )
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
@@ -1022,14 +1094,6 @@ with tab_report:
         data=report_text.encode("utf-8"),
         file_name=f"relatorio_megasena_{result['seed']}.txt",
         mime="text/plain",
-        use_container_width=True,
-    )
-
-    st.download_button(
-        "Baixar resumo (MD)",
-        data=("\n".join([f"- {b}" for b in bullets])).encode("utf-8"),
-        file_name=f"resumo_megasena_{result['seed']}.md",
-        mime="text/markdown",
         use_container_width=True,
     )
 
