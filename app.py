@@ -503,9 +503,9 @@ def build_report_pdf(result: dict) -> bytes:
 
 
 # =========================
-# PDF CANHOTO - VISUAL "APP" (somente números do jogo)
+# PDF CANHOTO - VISUAL "APP" (somente dezenas sugeridas)
 # 2 jogos por página
-# TOP 2 separado em nova página (2 jogos por página)
+# TOP 2 separado em nova página
 # =========================
 def build_canhoto_pdf_visual_only_picks(
     result: dict,
@@ -516,15 +516,13 @@ def build_canhoto_pdf_visual_only_picks(
     """
     PDF estilo 'volante/app' (não oficial), inspirado no visual:
       - Barra superior verde
-      - Em vez de 01..60, mostra SOMENTE as dezenas sugeridas em "bolinhas"
+      - Mostra SOMENTE as dezenas sugeridas em "bolinhas"
       - 2 jogos por página
       - TOP 2 separado em nova página
     """
 
-    # Cores aproximadas
     GREEN = colors.HexColor("#0B8F3B")
     GREEN_DARK = colors.HexColor("#087233")
-    GREY_STROKE = colors.HexColor("#C8CDD0")
     WHITE = colors.white
     BG = colors.HexColor("#F7FAF8")
 
@@ -535,7 +533,6 @@ def build_canhoto_pdf_visual_only_picks(
     margin = 12 * mm
     gap_block = 10 * mm
 
-    # 2 blocos por página (um em cima, um embaixo)
     block_h = (H - 2 * margin - gap_block) / 2
     block_w = W - 2 * margin
 
@@ -543,7 +540,6 @@ def build_canhoto_pdf_visual_only_picks(
     inner_pad = 10 * mm
 
     def draw_top_bar(y_top, concurso_txt, sorteio_txt):
-        """Barra verde no topo do bloco."""
         c.setFillColor(GREEN)
         c.setStrokeColor(GREEN)
         c.rect(margin, y_top - header_h, block_w, header_h, stroke=0, fill=1)
@@ -571,48 +567,42 @@ def build_canhoto_pdf_visual_only_picks(
         c.drawString(x, y, f"{idx:02d} • {label}")
 
     def draw_picks_balls(x0, y0, w, h, nums):
-    """
-    Desenha apenas as dezenas do jogo (6 bolinhas) com tamanho controlado.
-    """
-    nums = sorted([int(n) for n in nums])
+        """
+        Desenha apenas as dezenas do jogo (6 bolinhas) com tamanho controlado.
+        """
+        nums = sorted([int(n) for n in nums])
 
-    # --- Tamanho controlado ---
-    # espaço horizontal por bolinha (6) + 5 gaps
-    # r escolhido para caber bem e não ficar gigante.
-    target_r = (w / (6 * 2 + 5 * 0.9)) / 2  # baseado no width e num gaps
-    r = max(5.0 * mm, min(target_r, 8.0 * mm))  # clamp: 5mm <= r <= 8mm
+        # --- raio baseado no espaço horizontal, com limites (clamp) ---
+        # 6 bolinhas => 12 "raios" + 5 gaps (~0.9r cada)
+        target_r = (w / (6 * 2 + 5 * 0.9)) / 2
+        r = max(5.0 * mm, min(target_r, 8.0 * mm))  # 5mm <= r <= 8mm
 
-    gap = r * 0.9
-    total_w = 6 * (2 * r) + 5 * gap
-    start_x = x0 + (w - total_w) / 2 + r
+        gap = r * 0.9
+        total_w = 6 * (2 * r) + 5 * gap
+        start_x = x0 + (w - total_w) / 2 + r
+        cy = y0 + h / 2
 
-    # centraliza verticalmente
-    cy = y0 + h / 2
+        font_size = max(12, min(18, int((r / mm) * 2)))  # ~12..18
+        c.setFont("Helvetica-Bold", font_size)
 
-    # fonte proporcional ao raio (controlada)
-    font_size = max(12, min(18, int(r / mm * 2)))  # ~ 12..18
-    c.setFont("Helvetica-Bold", font_size)
+        for i, n in enumerate(nums):
+            cx = start_x + i * (2 * r + gap)
 
-    for i, n in enumerate(nums):
-        cx = start_x + i * (2 * r + gap)
+            c.setFillColor(GREEN)
+            c.setStrokeColor(GREEN)
+            c.setLineWidth(1.1)
+            c.circle(cx, cy, r, stroke=1, fill=1)
 
-        c.setFillColor(colors.HexColor("#0B8F3B"))
-        c.setStrokeColor(colors.HexColor("#0B8F3B"))
-        c.setLineWidth(1.1)
-        c.circle(cx, cy, r, stroke=1, fill=1)
+            c.setFillColor(WHITE)
+            c.drawCentredString(cx, cy - (font_size * 0.32), f"{n:02d}")
 
-        c.setFillColor(colors.white)
-        # ajuste fino do baseline conforme o tamanho
-        c.drawCentredString(cx, cy - (font_size * 0.32), f"{n:02d}")
-
-    # linha “assinatura” no rodapé do bloco
-    c.setStrokeColor(colors.HexColor("#D1D9DD"))
-    c.setLineWidth(0.8)
-    c.line(x0, y0 + 6 * mm, x0 + w, y0 + 6 * mm)
-    c.setFillColor(colors.HexColor("#6B7A7E"))
-    c.setFont("Helvetica", 8)
-    c.drawString(x0, y0 + 2.5 * mm, "Conferido / Assinatura")
-
+        # linha “assinatura”
+        c.setStrokeColor(colors.HexColor("#D1D9DD"))
+        c.setLineWidth(0.8)
+        c.line(x0, y0 + 6 * mm, x0 + w, y0 + 6 * mm)
+        c.setFillColor(colors.HexColor("#6B7A7E"))
+        c.setFont("Helvetica", 8)
+        c.drawString(x0, y0 + 2.5 * mm, "Conferido / Assinatura")
 
     def draw_block(y_bottom, kind, idx_global, nums, label):
         y_top = y_bottom + block_h
@@ -622,7 +612,6 @@ def build_canhoto_pdf_visual_only_picks(
         label_y = y_top - header_h - 7 * mm
         draw_game_label(margin + inner_pad, label_y, label, idx_global, kind)
 
-        # área das bolinhas
         balls_top = label_y - 10 * mm
         balls_bottom = y_bottom + 12 * mm
         balls_h = max(10 * mm, balls_top - balls_bottom)
@@ -630,7 +619,7 @@ def build_canhoto_pdf_visual_only_picks(
 
         draw_picks_balls(margin + inner_pad, balls_bottom, balls_w, balls_h, nums)
 
-    # ---------- Listas ----------
+    # listas
     cobertura = [(i + 1, "COBERTURA", g) for i, g in enumerate(result.get("games_coverage", []))]
     top2 = []
     if result.get("games_top"):
@@ -653,10 +642,7 @@ def build_canhoto_pdf_visual_only_picks(
                     c.setLineWidth(1)
                     c.line(margin, H - margin, W - margin, H - margin)
 
-            # bloco de cima ou baixo
             y_bottom = margin + block_h + gap_block if pos == 0 else margin
-
-            # índice global: cobertura usa sequência 01..N; top usa 01..2
             idx_global = i if kind != "TOP" else idx_local
 
             draw_block(
@@ -667,10 +653,10 @@ def build_canhoto_pdf_visual_only_picks(
                 label=label,
             )
 
-    # Cobertura
+    # cobertura
     render_list(cobertura, kind="COB", page_title=None)
 
-    # TOP separado em nova página
+    # TOP separado
     if top2:
         c.showPage()
         render_list(top2, kind="TOP", page_title="TOP 2 (separado)")
@@ -1041,7 +1027,6 @@ with tab_run:
             )
             st.dataframe(top_df, use_container_width=True, hide_index=True)
 
-        # ✅ Canhoto também aqui (aparece sempre após gerar)
         st.markdown("### 🎟️ Canhoto (visual mega-sena — apenas dezenas sugeridas)")
         canhoto_pdf = build_canhoto_pdf_visual_only_picks(result)
         st.download_button(
