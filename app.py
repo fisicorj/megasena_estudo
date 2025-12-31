@@ -15,7 +15,9 @@ import streamlit as st
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, ListFlowable, ListItem
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import cm
+from reportlab.lib.units import cm, mm
+from reportlab.pdfgen import canvas
+from reportlab.lib import colors
 
 
 # =========================
@@ -430,7 +432,7 @@ def build_report_text(result: dict) -> str:
 
 
 # =========================
-# PDF REPORT (reportlab)
+# PDF REPORT (reportlab) - Relatório textual
 # =========================
 def build_report_pdf(result: dict) -> bytes:
     buffer = BytesIO()
@@ -501,6 +503,115 @@ def build_report_pdf(result: dict) -> bytes:
 
 
 # =========================
+# PDF CANHOTO (volante-like, NÃO OFICIAL)
+# =========================
+def build_canhoto_pdf(result: dict) -> bytes:
+    """
+    PDF estilo "canhoto/volante" (não oficial):
+      - 20 jogos de cobertura
+      - + TOPs
+    Grade 2x6 => 12 por página.
+    """
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    W, H = A4
+
+    margin = 12 * mm
+    header_h = 22 * mm
+
+    cols = 2
+    rows = 6
+    block_w = (W - 2 * margin - (cols - 1) * 6 * mm) / cols
+    block_h = (H - 2 * margin - header_h - (rows - 1) * 6 * mm) / rows
+
+    r = 4.3 * mm
+    gap = 3.0 * mm
+    ball_fill = colors.whitesmoke
+    ball_stroke = colors.black
+    text_color = colors.black
+
+    jogos = []
+    for g in result.get("games_coverage", []):
+        jogos.append(("COB", g))
+    for t in result.get("games_top", []):
+        jogos.append(("TOP", t["nums"]))
+
+    def draw_header(page_no: int):
+        c.setFillColor(colors.black)
+        c.setFont("Helvetica-Bold", 14)
+        c.drawString(margin, H - margin - 8 * mm, "MEGA-SENA — CANHOTO (NÃO OFICIAL)")
+
+        c.setFont("Helvetica", 9)
+        seed = result.get("seed", "-")
+        dt = result.get("timestamp_sp", "-")
+        excel = result.get("excel_name", "arquivo.xlsx")
+        sha12 = (result.get("excel_sha256", "")[:12] + "…") if result.get("excel_sha256") else ""
+        c.drawString(margin, H - margin - 14 * mm, f"Data/Hora: {dt}   |   Seed: {seed}")
+        c.drawString(margin, H - margin - 18 * mm, f"Base: {excel} ({sha12})   |   Página: {page_no}")
+
+        c.setStrokeColor(colors.black)
+        c.setLineWidth(0.7)
+        c.line(margin, H - margin - header_h, W - margin, H - margin - header_h)
+
+    def draw_block(x, y, label, nums, idx):
+        c.setStrokeColor(colors.black)
+        c.setLineWidth(0.6)
+        c.roundRect(x, y, block_w, block_h, 6, stroke=1, fill=0)
+
+        c.setFont("Helvetica-Bold", 10)
+        c.setFillColor(colors.black)
+        c.drawString(x + 6 * mm, y + block_h - 7 * mm, f"{idx:02d} • {label}")
+
+        nums = sorted([int(n) for n in nums])
+        total_w = 6 * (2 * r) + 5 * gap
+        start_x = x + (block_w - total_w) / 2 + r
+        cy = y + block_h / 2 - 2 * mm
+
+        c.setFont("Helvetica-Bold", 10)
+        for i, n in enumerate(nums):
+            cx = start_x + i * (2 * r + gap)
+            c.setFillColor(ball_fill)
+            c.setStrokeColor(ball_stroke)
+            c.circle(cx, cy, r, stroke=1, fill=1)
+
+            c.setFillColor(text_color)
+            c.drawCentredString(cx, cy - 3.2, f"{n:02d}")
+
+        c.setStrokeColor(colors.black)
+        c.setLineWidth(0.4)
+        c.line(x + 6 * mm, y + 6 * mm, x + block_w - 6 * mm, y + 6 * mm)
+        c.setFont("Helvetica", 7)
+        c.drawString(x + 6 * mm, y + 2.5 * mm, "Conferido / Assinatura")
+
+    page_no = 1
+    draw_header(page_no)
+
+    per_page = cols * rows
+    for i, (label, nums) in enumerate(jogos, start=1):
+        pos = (i - 1) % per_page
+        if pos == 0 and i != 1:
+            c.showPage()
+            page_no += 1
+            draw_header(page_no)
+
+        r_i = pos // cols
+        c_i = pos % cols
+
+        x = margin + c_i * (block_w + 6 * mm)
+        y_top = H - margin - header_h
+        y = y_top - (r_i + 1) * block_h - r_i * 6 * mm
+
+        draw_block(x, y, label, nums, i)
+
+    c.showPage()
+    c.save()
+
+    pdf = buf.getvalue()
+    buf.close()
+    return pdf
+
+
+# =========================
 # UI (visual)
 # =========================
 def inject_css(compact: bool):
@@ -551,10 +662,9 @@ def icon_card(icon: str, title: str, value: str, sub: str = ""):
     )
 
 def style_top_table(df: pd.DataFrame):
-    styler = df.style.format({"n": lambda x: f"{int(x):02d}", "count": "{:.0f}", "pct": "{:.2f}%"})
-    styler = styler.background_gradient(subset=["count"], cmap="Blues")
-    styler = styler.background_gradient(subset=["pct"], cmap="Greens")
-    return styler
+    # NÃO usa background_gradient (evita exigir matplotlib no runtime).
+    # Você pode reativar gradiente depois que garantir matplotlib no requirements.
+    return df
 
 
 # =========================
@@ -587,7 +697,6 @@ with st.sidebar:
 
     seed_mode = st.radio("Seed", ["Aleatória", "Fixar"], horizontal=True)
 
-    # ✅ FIX: seed fixa NÃO pode ser number_input (JS limita 2^53-1).
     seed_text = None
     seed_error = None
     if seed_mode == "Fixar":
@@ -639,7 +748,6 @@ with st.sidebar:
 modo_compact = bool(st.session_state["compact"])
 inject_css(modo_compact)
 
-# Exit compact (also resets widget key)
 def exit_compact():
     st.session_state["compact"] = False
     st.session_state["compact_toggle_sidebar"] = False
@@ -688,8 +796,12 @@ tab_stats, tab_run, tab_report, tab_export, tab_debug = st.tabs(
     ["📊 Estatísticas", "✅ Jogos", "🧾 Relatório", "⬇️ Exportar", "🧪 Debug"]
 )
 
+# =========================
+# Estatísticas
+# =========================
 with tab_stats:
     left, right = st.columns([1, 1], gap="large")
+
     with left:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.subheader("Top por posição")
@@ -712,13 +824,15 @@ with tab_stats:
         st.bar_chart(chart_df)
         st.markdown("</div>", unsafe_allow_html=True)
 
+# =========================
+# Execução
+# =========================
 with tab_run:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("Geração de jogos")
     st.caption("A geração pesada só roda quando você clica em **Gerar jogos** na sidebar.")
 
     if run_btn:
-        # block run if seed invalid
         if seed_mode == "Fixar" and seed_error:
             st.error("Corrija a seed fixa antes de gerar.")
             st.stop()
@@ -819,6 +933,7 @@ with tab_run:
                 "games_top": top_games,
                 "coverage_metrics_20": m20,
                 "coverage_metrics_total": mt,
+                "run_key": run_key,
             }
 
             st.session_state["runs"][run_key] = result
@@ -836,9 +951,9 @@ with tab_run:
         st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
         st.markdown('<div class="grid">', unsafe_allow_html=True)
         icon_card("🧬", "Seed", str(result["seed"]), "Reproduzível")
+        icon_card("🔑", "Run key", result["run_key"][:10] + "…", "Identificador")
         icon_card("🧺", "Pool válido", f"{result['pool_len']:,}", f"Tentativas: {result['pool_tries']:,}")
         icon_card("🧩", "Distintos (20)", str(result["coverage_metrics_20"]["distinct"]), f"Peak: {result['coverage_metrics_20']['peak']}")
-        icon_card("🏆", "TOP adicionados", str(len(result["games_top"])), f"Total distinct: {result['coverage_metrics_total']['distinct']}")
         st.markdown('</div>', unsafe_allow_html=True)
         st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
@@ -863,9 +978,12 @@ with tab_run:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
+# =========================
+# Relatório
+# =========================
 with tab_report:
     st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.subheader("Resumo executivo + Relatório + PDF")
+    st.subheader("Resumo executivo + Relatório + PDFs")
 
     last_key = st.session_state.get("last_run_key")
     runs = st.session_state.get("runs", {})
@@ -882,6 +1000,19 @@ with tab_report:
         st.markdown(f"- {b}")
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
+
+    st.markdown("### 🎟️ Canhoto (estilo volante) — PDF")
+    canhoto_pdf = build_canhoto_pdf(result)
+    st.download_button(
+        "🎟️ Baixar canhoto (PDF estilo volante)",
+        data=canhoto_pdf,
+        file_name=f"canhoto_megasena_{result['seed']}.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
+
+    st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
+
     st.markdown("### 🧾 Relatório (copiar/colar)")
     report_text = build_report_text(result)
     st.text_area("Relatório pronto", report_text, height=420)
@@ -904,7 +1035,7 @@ with tab_report:
 
     pdf_bytes = build_report_pdf(result)
     st.download_button(
-        "📄 Baixar relatório em PDF",
+        "📄 Baixar relatório em PDF (texto)",
         data=pdf_bytes,
         file_name=f"relatorio_megasena_{result['seed']}.pdf",
         mime="application/pdf",
@@ -914,6 +1045,9 @@ with tab_report:
     st.caption("Para imprimir: ative **Modo compact** e use Ctrl+P no navegador.")
     st.markdown("</div>", unsafe_allow_html=True)
 
+# =========================
+# Export
+# =========================
 with tab_export:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("⬇️ Exportar resultados")
@@ -980,6 +1114,9 @@ with tab_export:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
+# =========================
+# Debug
+# =========================
 with tab_debug:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.subheader("Debug / Diagnóstico")
